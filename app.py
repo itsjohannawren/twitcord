@@ -285,7 +285,11 @@ async def twitter_parse_tweet (element) -> dict:
 	medias = await locator.all ()
 	for media in medias:
 		src = await media.get_attribute ("src");
-		poster = await media.get_attribute ("poster", timeout = 50);
+
+		try:
+			poster = await media.get_attribute ("poster", timeout = 100);
+		except:
+			poster = None
 
 		if poster is None:
 			tweet ["flags"]["has_image"] = True
