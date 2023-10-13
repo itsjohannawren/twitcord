@@ -17,19 +17,11 @@ twitter:
     username: TWITTER_USERNAME
     password: TWITTER_PASSWORD
   watch:
-    #StarTrekFleet:
-    #  webhook: stfc74-stfc-announcements
-    #  with-images: true
-    #  with-videos: true
-    #  without-media: true
-    #  posts: true
-    #  reposts: true
-    #  pinned: true
     USERNAME:
       webhook: WEBHOOK_NAME
       with-images: true # Send posts with images
       with-videos: true # Send posts with videos
       without-media: true # Send posts without images or videos
-      posts: false # Send user-created posts
+      posts: true # Send user-created posts
       reposts: true # Send reposts
       pinned: true # Send posts that get pinned
