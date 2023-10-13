@@ -1,0 +1,6 @@
+aiofiles
+aiohttp
+icecream
+playwright
+playwright_stealth
+pyyaml

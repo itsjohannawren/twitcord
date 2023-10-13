@@ -1,0 +1,12 @@
+# VirtualEnv
+bin
+include
+lib
+pyvenv.cfg
+
+# Configuration
+config.yaml
+
+# State
+history.json
+state.json
