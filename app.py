@@ -102,6 +102,8 @@ from asyncio import sleep
 import json
 import os.path
 import re
+import sys
+import time
 
 import aiofiles
 import aiohttp
@@ -175,6 +177,8 @@ async def twitter_is_logged_in (context:BrowserContext) -> bool:
 	return False
 
 async def twitter_parse_tweet (element) -> dict:
+	# Here thar be dragons!
+
 	tweet = {
 		"id": None,
 		"timestamp": None,
@@ -231,14 +235,14 @@ async def twitter_parse_tweet (element) -> dict:
 		tweet ["author"]["username"] = re.sub (r"^@", "", text)
 
 	# ID
-	locator = element.locator ("div > div > div:nth-of-type(2) > div:nth-of-type(2) > div > div > div > div > div > div:nth-of-type(2) > div > div > a")
+	locator = element.locator ("div > div > div:nth-of-type(2) > div:nth-of-type(2) > div > div > div > div > div > div:nth-of-type(2) > div > div a > time")
 	#locator = element.locator ("")
 	if await locator.count () > 0:
-		text = await locator.last.get_attribute ("href")
+		text = await locator.evaluate ("node => node.parentElement.getAttribute('href')")
 		tweet ["id"] = text
 
 	# Timestamp
-	locator = element.locator ("div > div > div:nth-of-type(2) > div:nth-of-type(2) > div > div > div > div > div > div:nth-of-type(2) > div > div > a > time")
+	locator = element.locator ("div > div > div:nth-of-type(2) > div:nth-of-type(2) > div > div > div > div > div > div:nth-of-type(2) > div > div a > time")
 	#locator = element.locator ("")
 	if await locator.count () > 0:
 		text = await locator.first.get_attribute ("datetime")
@@ -415,9 +419,14 @@ async def discord_send_webhook (url:str, embed:dict) -> bool:
 
 HISTORY_LOCK = asyncio.Lock ()
 
-async def history_has (webhook:str, username:str = None, id:str = None) -> bool:
-	if id is not None:
-		id = re.sub (r"^/([^/]+)/status/(\d+)$", r"\1/\2", id)
+async def history_has (webhook:str, username:str = None, id:str = None, per_user:bool = None, per_author:bool = None) -> bool:
+	if (per_user is None and per_author is None) or (per_user is False and per_author is False):
+		per_user = True
+	elif per_user is True and per_author is True:
+		raise ValueError ("Only one of per_user and per_author can be True")
+
+	#if id is not None:
+	#	id = re.sub (r"^/([^/]+)/status/(\d+)$", r"\1/\2", id)
 
 	async with HISTORY_LOCK:
 		async with aiofiles.open ("history.json", mode = "r") as fh:
@@ -435,9 +444,14 @@ async def history_has (webhook:str, username:str = None, id:str = None) -> bool:
 
 		return True
 
-async def history_add (webhook:str, username:str = None, id:str = None):
-	if id is not None:
-		id = re.sub (r"^/([^/]+)/status/(\d+)$", r"\1/\2", id)
+async def history_add (webhook:str, username:str = None, id:str = None, per_user:bool = None, per_author:bool = None):
+	if (per_user is None and per_author is None) or (per_user is False and per_author is False):
+		per_user = True
+	elif per_user is True and per_author is True:
+		raise ValueError ("Only one of per_user and per_author can be True")
+
+	#if id is not None:
+	#	id = re.sub (r"^/([^/]+)/status/(\d+)$", r"\1/\2", id)
 
 	async with HISTORY_LOCK:
 		async with aiofiles.open ("history.json", mode = "r") as fh:
@@ -460,83 +474,156 @@ async def history_add (webhook:str, username:str = None, id:str = None):
 # ==============================================================================
 
 async def main ():
+	# Load configuration
 	config = yaml_load ("config.yaml")
 
+	# Add an entry to each watched username to track the last time it was
+	# checked
+	for username in config ["twitter"]["watch"].keys ():
+		config ["twitter"]["watch"][username]["last"] = 0
+
+	# Into the land of the browser
 	async with async_playwright () as playwright:
+		# Start browser
 		browser = await playwright.webkit.launch (headless = True)
 
 		# If no previous browser context state, create one
 		if not os.path.isfile ("state.json"):
+			# Create a new context
 			context = await browser.new_context (
+				# Viewport information isn't strictly needed here, but for the
+				# sake of uniformity it's included
 				viewport = {
 					"width": config ["playwright"]["viewport"]["width"],
 					"height": config ["playwright"]["viewport"]["height"],
 				},
 			)
+			# Save the context state
 			await context.storage_state (path = "state.json")
+			# Close the context... we'll re-open using the saved state below
 			await context.close ()
 
+		# Open a browser context using the previously saved state so we don't
+		# always have to log into Twitter
 		context = await browser.new_context (
+			# Our previously saved state
 			storage_state = "state.json",
+			# Viewport size dictates how many tweets are loaded... mainly the
+			# height, but width does play a role at smaller dimensions
 			viewport = {
 				"width": config ["playwright"]["viewport"]["width"],
 				"height": config ["playwright"]["viewport"]["height"],
 			},
 		)
 
-		if await twitter_is_logged_in (context) is False:
-			if await twitter_login (
-				context,
-				config ["twitter"]["login"]["username"],
-				config ["twitter"]["login"]["password"]
-			) is False:
-				raise Exception ("Failed to log into Twitter")
-			await context.storage_state (path = "state.json")
+		# Here we go...
+		while True:
+			# A place to store the usernames of the accounts that need checking
+			to_check = []
+			# Loop through the watched accounts and note the ones that are due
+			# for checking
+			for username, settings in config ["twitter"]["watch"].items ():
+				# Compare the last check time to the current time
+				if settings ["last"] + settings ["interval"] <= time.time ():
+					# It's ready for checking, so append to the list
+					to_check.append (username)
 
-		for username, settings in config ["twitter"]["watch"].items ():
-			tweets = await twitter_get_user_tweets (context, username)
+			# If we don't have any accounts to check we're going to sleep for a
+			# short while before checking again
+			if len (to_check) == 0:
+				# Async sleepy time
+				await sleep (config ["twitter"]["delays"]["no_check"])
+				# Restart the loop
+				continue
 
-			new = False
-			if await history_has (settings ["webhook"], username) is False:
-				new = True
-
-			for tweet in tweets:
-				# Don't send a tweet if we've already done it
-				if await history_has (settings ["webhook"], username, tweet ["id"]) is True:
+			# We have accounts to check, so first verify we're still logged in
+			if await twitter_is_logged_in (context) is False:
+				# We're not logged in... we'll try logging in
+				if await twitter_login (
+					context,
+					config ["twitter"]["login"]["username"],
+					config ["twitter"]["login"]["password"]
+				) is False:
+					# Login failed! Complain to the console
+					print ("Error: Failed to log into Twitter!", file = sys.stderr)
+					# Async sleepy time so we don't spin hard on trying to login
+					await sleep (config ["twitter"]["delays"]["failed_login"])
+					# Restart the loop
 					continue
+				else:
+					# We're logged in, so save state so we save the cookies
+					await context.storage_state (path = "state.json")
 
-				# Check that the tweet is a type (post, repost, pin) we want to send
-				if settings ["posts"] is False and tweet ["flags"]["is_repost"] is False:
-					continue
-				if settings ["reposts"] is False and tweet ["flags"]["is_repost"] is True:
-					continue
-				if settings ["pinned"] is False and tweet ["flags"]["is_pinned"] is True:
-					continue
+			for username in to_check:
+				# Save us a bunch of typing by setting settings to the watch
+				# settings
+				settings = config ["twitter"]["watch"][username]
 
-				# Check for media constraints
-				if (
-					(
-						settings ["with-images"] is True and
-						tweet ["flags"]["has_image"] is True
-					) or
-					(
-						settings ["with-videos"] is True and
-						tweet ["flags"]["has_video"] is True
-					) or
-					(
-						settings ["without-media"] is True and
-						tweet ["flags"]["has_image"] is False and
-						tweet ["flags"]["has_video"] is False
-					)
-				):
-					# Only send if the webhook/username aren't new
-					if new is False:
-						embed = tweet_to_discord_embed (tweet, config)
-						await discord_send_webhook (config ["discord"]["webhooks"][settings ["webhook"]], embed)
+				# Load the user's tweets
+				tweets = await twitter_get_user_tweets (context, username)
 
-					# Add to history regardless
-					await history_add (settings ["webhook"], username, tweet ["id"])
+				# A place to save whether or not this is the first time we're
+				# checking this user's tweets... at least under this webhook
+				new = False
+				# Check for a history entry (not necessarily history) for this
+				# username under this webhook
+				if await history_has (settings ["webhook"], username) is False:
+					# No history entry? It's new!
+					new = True
 
+				# Time to check the tweets
+				for tweet in tweets:
+					# Don't send a tweet if we've already sent it
+					if await history_has (settings ["webhook"], username, tweet ["id"]) is True:
+						# Next tweet please
+						continue
+
+					ic (tweet)
+
+					# Check that the tweet is a type (post, repost, pin) we want
+					# to send
+					if settings ["posts"] is False and tweet ["flags"]["is_repost"] is False:
+						continue
+					if settings ["reposts"] is False and tweet ["flags"]["is_repost"] is True:
+						continue
+					if settings ["pinned"] is False and tweet ["flags"]["is_pinned"] is True:
+						continue
+
+					# Check for media constraints
+					if (
+						(
+							settings ["with-images"] is True and
+							tweet ["flags"]["has_image"] is True
+						) or
+						(
+							settings ["with-videos"] is True and
+							tweet ["flags"]["has_video"] is True
+						) or
+						(
+							settings ["without-media"] is True and
+							tweet ["flags"]["has_image"] is False and
+							tweet ["flags"]["has_video"] is False
+						)
+					):
+						# Only send if the webhook/username aren't new to avoid
+						# spamming the webhook with all the tweets we loaded,
+						# even if they're weeks old
+						if new is False:
+							# Generate the Discord embed object for the tweet
+							embed = tweet_to_discord_embed (tweet, config)
+							# Deliver the embed object to the webhook
+							await discord_send_webhook (config ["discord"]["webhooks"][settings ["webhook"]], embed)
+
+						# Add to history regardless-- if this is a new user
+						# under a webhook we need this so the next check will
+						# actually send tweets
+						await history_add (settings ["webhook"], username, tweet ["id"])
+
+				# Update the last check time... finally
+				config ["twitter"]["watch"][username]["last"] = time.time ()
+
+		# We probably won't get here, but we'll handle closing of the browser in
+		# case we somehow do
 		await browser.close ()
 
 # ==============================================================================

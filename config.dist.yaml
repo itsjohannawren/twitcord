@@ -13,12 +13,16 @@ discord:
     WEBHOOK_NAME: https://discord.com/api/webhooks/...
 
 twitter:
+  delays:
+    no_check: 2
+    failed_login: 120
   login:
     username: TWITTER_USERNAME
     password: TWITTER_PASSWORD
   watch:
     USERNAME:
       webhook: WEBHOOK_NAME
+      interval: 300
       with-images: true # Send posts with images
       with-videos: true # Send posts with videos
       without-media: true # Send posts without images or videos
