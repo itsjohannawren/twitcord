@@ -578,8 +578,6 @@ async def main ():
 						# Next tweet please
 						continue
 
-					ic (tweet)
-
 					# Check that the tweet is a type (post, repost, pin) we want
 					# to send
 					if settings ["posts"] is False and tweet ["flags"]["is_repost"] is False:
