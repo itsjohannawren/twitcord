@@ -14,6 +14,8 @@ twitter:
   delays:
     no_check: 2 # seconds
     failed_login: 120 # seconds
+  history_length: 200
+  check_length: 20
   login:
     username: TWITTER_USERNAME
     password: TWITTER_PASSWORD

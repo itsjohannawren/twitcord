@@ -28,4 +28,5 @@ exec docker run \
 	-v "${__DIR__}/config.yaml:/app/config.yaml:ro" \
 	-v "${__DIR__}/state.json:/app/state.json" \
 	-v "${__DIR__}/history.json:/app/history.json" \
+	--name twitcord
 	twitcord:dev

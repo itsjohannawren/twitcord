@@ -325,20 +325,37 @@ async def twitter_parse_tweet (element) -> dict:
 
 	return tweet
 
-async def twitter_get_user_tweets (context:BrowserContext, username:str) -> list[dict]:
+async def twitter_get_user_tweets (context:BrowserContext, username:str, minimum:int = 10) -> list[dict]:
 	tweets = []
 
 	page = await context.new_page ()
 	await stealth_async (page)
 
 	await page.goto (f"https://twitter.com/{username}")
-	await asyncio.sleep (5)
 
-	tweet_locator = page.locator ("section > h1 + div > div > div > div > div > article")
-	tweet_elements = await tweet_locator.all ()
+	while True:
+		await asyncio.sleep (3)
 
-	for tweet_element in tweet_elements:
-		tweets.append (await twitter_parse_tweet (tweet_element))
+		previous_tweets_length = len (tweets)
+
+		tweet_locator = page.locator ("section > h1 + div > div > div > div > div > article")
+		tweet_elements = await tweet_locator.all ()
+
+		for tweet_element in tweet_elements:
+			tweets.append (await twitter_parse_tweet (tweet_element))
+
+		tweets = {tweet ["id"]: tweet for tweet in tweets}
+		tweets = list (tweets.values ())
+
+		if len (tweets) >= minimum:
+			# We have enough posts now
+			break
+
+		if len (tweets) == previous_tweets_length:
+			# No new posts?
+			break
+
+		await page.evaluate ("window.scrollTo (0, document.body.scrollHeight);")
 
 	await page.close ()
 	return tweets
@@ -475,11 +492,17 @@ async def history_has (webhook:str, username:str = None, id:str = None, mode:str
 			if username is not None and id is not None and id.lower () not in history [webhook][username.lower ()]:
 				return False
 
-		elif mode == "by-author":
-			if id is not None and id.lower () not in history [webhook]:
-				return False
+			return True
 
-		return True
+		elif mode == "by-author":
+			if id is None:
+				return True
+
+			for user in history [webhook].keys ():
+				if id.lower () in history [webhook][user]:
+					return True
+
+			return False
 
 async def history_add (webhook:str, username:str = None, id:str = None, mode:str = None):
 	if mode is None:
@@ -497,22 +520,22 @@ async def history_add (webhook:str, username:str = None, id:str = None, mode:str
 			contents = await fh.read ()
 		history = json.loads (contents)
 
-		if mode == "by-account":
-			if webhook not in history:
-				history [webhook] = {}
+		#if mode == "by-account":
+		if webhook not in history:
+			history [webhook] = {}
 
-			if username is not None and username.lower () not in history [webhook]:
-				history [webhook][username.lower ()] = []
+		if username is not None and username.lower () not in history [webhook]:
+			history [webhook][username.lower ()] = []
 
-			if username is not None and id is not None and id.lower () not in history [webhook][username.lower ()]:
-				history [webhook][username.lower ()].append (id.lower ())
+		if username is not None and id is not None and id.lower () not in history [webhook][username.lower ()]:
+			history [webhook][username.lower ()].append (id.lower ())
 
-		elif mode == "by-author":
-			if webhook not in history:
-				history [webhook] = []
-
-			if id is not None and id.lower () not in history [webhook]:
-				history [webhook].append (id.lower ())
+		#elif mode == "by-author":
+		#	if webhook not in history:
+		#		history [webhook] = []
+		#
+		#	if id is not None and id.lower () not in history [webhook]:
+		#		history [webhook].append (id.lower ())
 
 		contents = json.dumps (history, separators = (",", ":"))
 		async with aiofiles.open ("history.json", mode = "w") as fh:
@@ -662,39 +685,38 @@ async def main ():
 				history_mode = config ["watches"][watch_index]["history"]
 				settings = config ["watches"][watch_index]["accounts"][username]
 
-				# Load the user's tweets
-				tweets = await twitter_get_user_tweets (context, username)
-
-				# A place to save whether or not this is the first time we're
-				# checking this user's tweets... at least under this webhook
-				new = False
 				# Check for a history entry (not necessarily history) for this
 				# username under this webhook
-				if await history_has (webhook, username, mode = history_mode) is False:
-					# No history entry? It's new!
-					new = True
+				if await history_has (webhook, username, mode = "by-account") is False:
+					# No history entry? It's new! Grab a BUNCH of posts because
+					# sometimes ordering changes to bring old posts to the top
+					tweets = await twitter_get_user_tweets (context, username, minimum = config ["twitter"]["history_length"])
+					# Time to "check" the tweets
+					for tweet in tweets:
+						# Add to history because we're building out a new
+						# history
+						await history_add (webhook, username, tweet ["id"], mode = history_mode)
 
-				# Time to check the tweets
-				for tweet in tweets:
-					# Don't send a tweet if we've already sent it
-					if await history_has (webhook, username, tweet ["id"], mode = history_mode) is True:
-						# Next tweet please
-						continue
+				else:
+					# Just a normal check... Load the user's tweets
+					tweets = await twitter_get_user_tweets (context, username, minimum = config ["twitter"]["check_length"])
 
-					# Is this something we're supposed to send to the webhook?
-					if tweet_sendable (settings, tweet) is True:
-						# Only send if the webhook/username aren't new to avoid
-						# spamming the webhook with all the tweets we loaded,
-						# even if they're weeks old
-						if new is False:
+					# Time to check the tweets
+					for tweet in tweets:
+						# Don't send a tweet if we've already sent it
+						if await history_has (webhook, username, tweet ["id"], mode = history_mode) is True:
+							# Next tweet please
+							continue
+
+						# Is this something we're supposed to send to the webhook?
+						if tweet_sendable (settings, tweet) is True:
 							# Generate the Discord embed object for the tweet
 							embed = await tweet_to_discord_embed (tweet, config)
 							# Deliver the embed object to the webhook
 							await discord_send_webhook (webhook, embed)
 
-						# Add to history regardless-- if this is a new user
-						# under a webhook we need this so the next check will
-						# actually send tweets
+						# Add to history regardless of whether or not we
+						# send it
 						await history_add (webhook, username, tweet ["id"], mode = history_mode)
 
 		# We probably won't get here, but we'll handle closing of the browser in
