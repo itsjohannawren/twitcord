@@ -98,7 +98,6 @@ del __virtualenv
 # ==============================================================================
 
 import asyncio
-from asyncio import sleep
 import json
 import os.path
 import re
@@ -107,6 +106,7 @@ import time
 
 import aiofiles
 import aiohttp
+from bs4 import BeautifulSoup
 from icecream import ic
 from playwright.async_api import async_playwright, BrowserContext, BrowserType
 from playwright_stealth import stealth_async
@@ -251,9 +251,15 @@ async def twitter_parse_tweet (element) -> dict:
 	# Content text and richtext
 	locator = element.locator ("div > div > div:nth-of-type(2) > div:nth-of-type(2) > div:nth-of-type(2) > div > *")
 	#locator = element.locator ("")
-	spans = await locator.all ()
-	for span in spans:
-		locator = span.locator ("a")
+	content_elements = await locator.all ()
+	for content_element in content_elements:
+		locator = content_element.locator ("a")
+
+		try:
+			image_alt = await content_element.get_attribute ("alt", timeout = 10)
+		except:
+			image_alt = None
+
 		if await locator.count () != 0:
 			anchors = await locator.all ()
 			for anchor in anchors:
@@ -276,11 +282,18 @@ async def twitter_parse_tweet (element) -> dict:
 					"text": text,
 				})
 
-		else:
-			tweet ["content"]["text"] += await span.inner_text ()
+		elif image_alt is not None:
+			tweet ["content"]["text"] += image_alt
 			tweet ["content"]["richtext"].append ({
 				"url": None,
-				"text": await span.inner_text ()
+				"text": image_alt
+			})
+
+		else:
+			tweet ["content"]["text"] += await content_element.inner_text ()
+			tweet ["content"]["richtext"].append ({
+				"url": None,
+				"text": await content_element.inner_text ()
 			})
 
 	# Content media
@@ -319,7 +332,7 @@ async def twitter_get_user_tweets (context:BrowserContext, username:str) -> list
 	await stealth_async (page)
 
 	await page.goto (f"https://twitter.com/{username}")
-	await sleep (5)
+	await asyncio.sleep (5)
 
 	tweet_locator = page.locator ("section > h1 + div > div > div > div > div > article")
 	tweet_elements = await tweet_locator.all ()
@@ -332,7 +345,7 @@ async def twitter_get_user_tweets (context:BrowserContext, username:str) -> list
 
 # ==============================================================================
 
-def tweet_to_discord_embed (tweet:dict, config:dict) -> dict:
+async def tweet_to_discord_embed (tweet:dict, config:dict) -> dict:
 	embed = {
 		"username": config ["discord"]["embed"]["username"],
 		"avatar_url": config ["discord"]["embed"]["avatar_url"],
@@ -359,13 +372,6 @@ def tweet_to_discord_embed (tweet:dict, config:dict) -> dict:
 		]
 	}
 
-	if tweet ["flags"]["has_video"] is True:
-		embed ["embeds"][0]["fields"].append ({
-			"name": "Note",
-			"value": "Post contains a video. To view it, click \"View on X\" above.",
-			"inline": False
-		})
-
 	for part in tweet ["content"]["richtext"]:
 		text = re.sub (r"([`_*~()\[\]])", r"\\\1", part ["text"])
 		text = re.sub (r"^(\s*)([>-])", r"\1\\\2", text)
@@ -376,23 +382,24 @@ def tweet_to_discord_embed (tweet:dict, config:dict) -> dict:
 		else:
 			embed ["embeds"][0]["description"] += text
 
-	first_item = False
+	needs_video_notice = False
 	for item in tweet ["content"]["media"]:
-		if first_item is True:
-			first_item = False
-
-			if item ["type"] == "image":
-				embed ["embeds"][0]["image"] = {
+		if item ["type"] == "image":
+			embed ["embeds"].append ({
+				"url": f"https://twitter.com{tweet['id']}",
+				"image": {
 					"url": re.sub (r"&name=small\b", "", item ["image"])
 				}
+			})
 
-			elif item ["type"] == "video":
-				embed ["embeds"][0]["image"] = {
-					"url": re.sub (r"&name=small\b", "", item ["image"])
+		elif item ["type"] == "video":
+			url = None # await vxtwitter_get_video_url (tweet ["id"])
+			if url is not None:
+				embed ["embeds"][0]["video"] = {
+					"url": url
 				}
-
-		else:
-			if item ["type"] == "image":
+			else:
+				needs_video_notice = True
 				embed ["embeds"].append ({
 					"url": f"https://twitter.com{tweet['id']}",
 					"image": {
@@ -400,13 +407,12 @@ def tweet_to_discord_embed (tweet:dict, config:dict) -> dict:
 					}
 				})
 
-			elif item ["type"] == "video":
-				embed ["embeds"].append ({
-					"url": f"https://twitter.com{tweet['id']}",
-					"image": {
-						"url": re.sub (r"&name=small\b", "", item ["image"])
-					}
-				})
+	if needs_video_notice is True:
+		embed ["embeds"][0]["fields"].append ({
+			"name": "Note",
+			"value": "Post contains a video. To view it, click \"View on X\" above.",
+			"inline": False
+		})
 
 	return embed
 
@@ -417,16 +423,42 @@ async def discord_send_webhook (url:str, embed:dict) -> bool:
 
 # ==============================================================================
 
+async def vxtwitter_get_video_url (id:str) -> str:
+	response = None
+
+	async with aiohttp.ClientSession () as session:
+		response = await session.get (
+			f"https://vxtwitter.com{id}",
+			headers = {
+				"User-Agent": "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
+			}
+		)
+		response = await response.text ()
+
+	page = BeautifulSoup (response, "html5lib")
+	elements = page.css.select ('head meta[property="og:video"]')
+	if len (elements) == 0:
+		return None
+
+	if "content" not in elements [0].attrs:
+		return None
+
+	return elements [0]["content"]
+
+# ==============================================================================
+
 HISTORY_LOCK = asyncio.Lock ()
 
-async def history_has (webhook:str, username:str = None, id:str = None, per_user:bool = None, per_author:bool = None) -> bool:
-	if (per_user is None and per_author is None) or (per_user is False and per_author is False):
-		per_user = True
-	elif per_user is True and per_author is True:
-		raise ValueError ("Only one of per_user and per_author can be True")
+async def history_has (webhook:str, username:str = None, id:str = None, mode:str = None) -> bool:
+	if mode is None:
+		mode = "by-author"
+	elif mode.lower () not in ("by-account", "by-author"):
+		raise ValueError (f"Invalid history mode: {mode}")
+	else:
+		mode = mode.lower ()
 
-	#if id is not None:
-	#	id = re.sub (r"^/([^/]+)/status/(\d+)$", r"\1/\2", id)
+	if id is not None:
+		id = re.sub (r"^/([^/]+)/status/(\d+)$", r"\1/\2", id)
 
 	async with HISTORY_LOCK:
 		async with aiofiles.open ("history.json", mode = "r") as fh:
@@ -436,40 +468,117 @@ async def history_has (webhook:str, username:str = None, id:str = None, per_user
 		if webhook not in history:
 			return False
 
-		if username is not None and username.lower () not in history [webhook]:
-			return False
+		if mode == "by-account":
+			if username is not None and username.lower () not in history [webhook]:
+				return False
 
-		if username is not None and id is not None and id.lower () not in history [webhook][username.lower ()]:
-			return False
+			if username is not None and id is not None and id.lower () not in history [webhook][username.lower ()]:
+				return False
+
+		elif mode == "by-author":
+			if id is not None and id.lower () not in history [webhook]:
+				return False
 
 		return True
 
-async def history_add (webhook:str, username:str = None, id:str = None, per_user:bool = None, per_author:bool = None):
-	if (per_user is None and per_author is None) or (per_user is False and per_author is False):
-		per_user = True
-	elif per_user is True and per_author is True:
-		raise ValueError ("Only one of per_user and per_author can be True")
+async def history_add (webhook:str, username:str = None, id:str = None, mode:str = None):
+	if mode is None:
+		mode = "by-author"
+	elif mode.lower () not in ("by-account", "by-author"):
+		raise ValueError (f"Invalid history mode: {mode}")
+	else:
+		mode = mode.lower ()
 
-	#if id is not None:
-	#	id = re.sub (r"^/([^/]+)/status/(\d+)$", r"\1/\2", id)
+	if id is not None:
+		id = re.sub (r"^/([^/]+)/status/(\d+)$", r"\1/\2", id)
 
 	async with HISTORY_LOCK:
 		async with aiofiles.open ("history.json", mode = "r") as fh:
 			contents = await fh.read ()
 		history = json.loads (contents)
 
-		if webhook not in history:
-			history [webhook] = {}
+		if mode == "by-account":
+			if webhook not in history:
+				history [webhook] = {}
 
-		if username is not None and username.lower () not in history [webhook]:
-			history [webhook][username.lower ()] = []
+			if username is not None and username.lower () not in history [webhook]:
+				history [webhook][username.lower ()] = []
 
-		if username is not None and id is not None and id.lower () not in history [webhook][username.lower ()]:
-			history [webhook][username.lower ()].append (id.lower ())
+			if username is not None and id is not None and id.lower () not in history [webhook][username.lower ()]:
+				history [webhook][username.lower ()].append (id.lower ())
+
+		elif mode == "by-author":
+			if webhook not in history:
+				history [webhook] = []
+
+			if id is not None and id.lower () not in history [webhook]:
+				history [webhook].append (id.lower ())
 
 		contents = json.dumps (history, separators = (",", ":"))
 		async with aiofiles.open ("history.json", mode = "w") as fh:
 			await fh.write (contents)
+
+# ==============================================================================
+
+def add_accounts_last_time (config:dict):
+	# Loop through the watch groups
+	for watch_index in range (0, len (config ["watches"])):
+		# Loop through the watched accounts in the group
+		for username in config ["watches"][watch_index]["accounts"].keys ():
+			# Add a place to store the last checked timestamp
+			config ["watches"][watch_index]["accounts"][username]["last"] = 0
+
+def accounts_ready_to_check (config:dict) -> list[tuple]:
+	# A place to store the webhooks and usernames of the accounts that need
+	# checking
+	to_check = []
+
+	# Loop through the watch groups
+	for watch_index in range (0, len (config ["watches"])):
+		# Loop through the watched accounts and note the ones that are due for
+		# checking
+		for username, settings in config ["watches"][watch_index]["accounts"].items ():
+			# Compare the last check time to the current time
+			if settings ["last"] + settings ["interval"] <= time.time ():
+				# It's ready for checking, so append to the list
+				to_check.append ((
+					watch_index, # config ["watches"][watch_index]["webhook"],
+					username,
+				))
+				# Update the last check time now so it's actually an interval
+				# and not a delay between checks
+				config ["watches"][watch_index]["accounts"][username]["last"] = time.time ()
+
+	return to_check
+
+def tweet_sendable (settings:dict, tweet:dict) -> bool:
+	# Check that the tweet is a type (post, repost, pin) we want to send
+	if settings ["posts"] is False and tweet ["flags"]["is_repost"] is False:
+		return False
+	if settings ["reposts"] is False and tweet ["flags"]["is_repost"] is True:
+		return False
+	if settings ["pinned"] is False and tweet ["flags"]["is_pinned"] is True:
+		return False
+
+	# Check for media constraints
+	if (
+		(
+			settings ["with-images"] is True and
+			tweet ["flags"]["has_image"] is True
+		) or
+		(
+			settings ["with-videos"] is True and
+			tweet ["flags"]["has_video"] is True
+		) or
+		(
+			settings ["without-media"] is True and
+			tweet ["flags"]["has_image"] is False and
+			tweet ["flags"]["has_video"] is False
+		)
+	):
+		return True
+	else:
+		return False
 
 # ==============================================================================
 
@@ -479,8 +588,7 @@ async def main ():
 
 	# Add an entry to each watched username to track the last time it was
 	# checked
-	for username in config ["twitter"]["watch"].keys ():
-		config ["twitter"]["watch"][username]["last"] = 0
+	add_accounts_last_time (config)
 
 	# Into the land of the browser
 	async with async_playwright () as playwright:
@@ -518,21 +626,14 @@ async def main ():
 
 		# Here we go...
 		while True:
-			# A place to store the usernames of the accounts that need checking
-			to_check = []
-			# Loop through the watched accounts and note the ones that are due
-			# for checking
-			for username, settings in config ["twitter"]["watch"].items ():
-				# Compare the last check time to the current time
-				if settings ["last"] + settings ["interval"] <= time.time ():
-					# It's ready for checking, so append to the list
-					to_check.append (username)
+			# Grab a list of webhooks+accounts ready to be checked
+			to_check = accounts_ready_to_check (config)
 
 			# If we don't have any accounts to check we're going to sleep for a
 			# short while before checking again
 			if len (to_check) == 0:
 				# Async sleepy time
-				await sleep (config ["twitter"]["delays"]["no_check"])
+				await asyncio.sleep (config ["twitter"]["delays"]["no_check"])
 				# Restart the loop
 				continue
 
@@ -547,17 +648,19 @@ async def main ():
 					# Login failed! Complain to the console
 					print ("Error: Failed to log into Twitter!", file = sys.stderr)
 					# Async sleepy time so we don't spin hard on trying to login
-					await sleep (config ["twitter"]["delays"]["failed_login"])
+					await asyncio.sleep (config ["twitter"]["delays"]["failed_login"])
 					# Restart the loop
 					continue
 				else:
 					# We're logged in, so save state so we save the cookies
 					await context.storage_state (path = "state.json")
 
-			for username in to_check:
-				# Save us a bunch of typing by setting settings to the watch
-				# settings
-				settings = config ["twitter"]["watch"][username]
+			for watch_index, username in to_check:
+				# Save us a bunch of typing by setting some variables to long
+				# structure paths
+				webhook = config ["watches"][watch_index]["webhook"]
+				history_mode = config ["watches"][watch_index]["history"]
+				settings = config ["watches"][watch_index]["accounts"][username]
 
 				# Load the user's tweets
 				tweets = await twitter_get_user_tweets (context, username)
@@ -567,58 +670,32 @@ async def main ():
 				new = False
 				# Check for a history entry (not necessarily history) for this
 				# username under this webhook
-				if await history_has (settings ["webhook"], username) is False:
+				if await history_has (webhook, username, mode = history_mode) is False:
 					# No history entry? It's new!
 					new = True
 
 				# Time to check the tweets
 				for tweet in tweets:
 					# Don't send a tweet if we've already sent it
-					if await history_has (settings ["webhook"], username, tweet ["id"]) is True:
+					if await history_has (webhook, username, tweet ["id"], mode = history_mode) is True:
 						# Next tweet please
 						continue
 
-					# Check that the tweet is a type (post, repost, pin) we want
-					# to send
-					if settings ["posts"] is False and tweet ["flags"]["is_repost"] is False:
-						continue
-					if settings ["reposts"] is False and tweet ["flags"]["is_repost"] is True:
-						continue
-					if settings ["pinned"] is False and tweet ["flags"]["is_pinned"] is True:
-						continue
-
-					# Check for media constraints
-					if (
-						(
-							settings ["with-images"] is True and
-							tweet ["flags"]["has_image"] is True
-						) or
-						(
-							settings ["with-videos"] is True and
-							tweet ["flags"]["has_video"] is True
-						) or
-						(
-							settings ["without-media"] is True and
-							tweet ["flags"]["has_image"] is False and
-							tweet ["flags"]["has_video"] is False
-						)
-					):
+					# Is this something we're supposed to send to the webhook?
+					if tweet_sendable (settings, tweet) is True:
 						# Only send if the webhook/username aren't new to avoid
 						# spamming the webhook with all the tweets we loaded,
 						# even if they're weeks old
 						if new is False:
 							# Generate the Discord embed object for the tweet
-							embed = tweet_to_discord_embed (tweet, config)
+							embed = await tweet_to_discord_embed (tweet, config)
 							# Deliver the embed object to the webhook
-							await discord_send_webhook (config ["discord"]["webhooks"][settings ["webhook"]], embed)
+							await discord_send_webhook (webhook, embed)
 
 						# Add to history regardless-- if this is a new user
 						# under a webhook we need this so the next check will
 						# actually send tweets
-						await history_add (settings ["webhook"], username, tweet ["id"])
-
-				# Update the last check time... finally
-				config ["twitter"]["watch"][username]["last"] = time.time ()
+						await history_add (webhook, username, tweet ["id"], mode = history_mode)
 
 		# We probably won't get here, but we'll handle closing of the browser in
 		# case we somehow do

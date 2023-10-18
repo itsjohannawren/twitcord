@@ -1,6 +1,13 @@
 aiofiles
 aiohttp
+
 icecream
+
 playwright
 playwright_stealth
+
+beautifulsoup4
+html5lib
+lxml
+
 pyyaml

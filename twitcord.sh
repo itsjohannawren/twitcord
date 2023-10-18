@@ -23,7 +23,7 @@ if [ ! -e "${__DIR__}/config.yaml" ]; then
 fi
 
 exec docker run \
-	-i \
+	-d \
 	--rm \
 	-v "${__DIR__}/config.yaml:/app/config.yaml:ro" \
 	-v "${__DIR__}/state.json:/app/state.json" \

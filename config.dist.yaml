@@ -1,7 +1,7 @@
 playwright:
   viewport:
-    width: 1280
-    height: 3000
+    width: 1280 # pixels
+    height: 3000 # pixels
 
 discord:
   embed:
@@ -9,23 +9,24 @@ discord:
     avatar_url: https://about.twitter.com/content/dam/about-twitter/x/brand-toolkit/logo-black.png.twimg.1920.png
     flags: 4096 # No @here or @everyone
     color: 16711762 # ff0052
-  webhooks:
-    WEBHOOK_NAME: https://discord.com/api/webhooks/...
 
 twitter:
   delays:
-    no_check: 2
-    failed_login: 120
+    no_check: 2 # seconds
+    failed_login: 120 # seconds
   login:
     username: TWITTER_USERNAME
     password: TWITTER_PASSWORD
-  watch:
-    USERNAME:
-      webhook: WEBHOOK_NAME
-      interval: 300
-      with-images: true # Send posts with images
-      with-videos: true # Send posts with videos
-      without-media: true # Send posts without images or videos
-      posts: true # Send user-created posts
-      reposts: true # Send reposts
-      pinned: true # Send posts that get pinned
+
+watches:
+  - webhook: https://discord.com/api/webhooks/...
+    history: by-author # by-account
+    accounts:
+      USERNAME:
+        interval: 300 # seconds
+        with-images: true # Send posts with images
+        with-videos: true # Send posts with videos
+        without-media: true # Send posts without images or videos
+        posts: true # Send user-created posts
+        reposts: true # Send reposts
+        pinned: true # Send posts that get pinned
